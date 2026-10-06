@@ -1,0 +1,29 @@
+# ===== 虚拟环境（保留 venv310 在本地，三套环境都不提交） =====
+venv/
+venv_new/
+venv310/
+
+# ===== Python 缓存与编译产物 =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ===== 运行时数据与日志（代码会自动创建） =====
+data/
+logs/
+*.log
+
+# ===== 临时文件 =====
+temp*
+*.bak
+_*.py
+
+# ===== IDE / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== 密钥（如改用 .env 方式） =====
+.env
