@@ -1,16 +1,25 @@
 # -*- coding: utf-8 -*-
+"""MCP SSE 连通性冒烟测试（需要 8604 服务已启动，非单元测试，不进 CI）。
+
+用法（项目根目录）：
+    python tests/test_sse.py
 """
-测试 MCP SSE 连接是否可用
-"""
-import requests
+import os
 import sys
+
+import requests
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
-url = "http://127.0.0.1:8604/sse"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+
+from app.config import HOST, PORT_MCP_ALL  # noqa: E402
+
+url = f"http://{HOST}:{PORT_MCP_ALL}/sse"
 print(f"测试连接: {url}")
 
 try:

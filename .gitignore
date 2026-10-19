@@ -19,6 +19,10 @@ temp*
 *.bak
 _*.py
 
+# ===== 本地重构备份 =====
+backup*/
+*_backup_*/
+
 # ===== IDE / 系统 =====
 .idea/
 .vscode/

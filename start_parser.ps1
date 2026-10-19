@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # 一键启动 HTTP 网关服务（端口 8501，对接 JeecgBoot 前端）
 # 请先启动 start_mcp（8604），再启动本脚本。
 # ============================================================
@@ -13,5 +13,5 @@ if (-not $env:ZHIPU_API_KEY) {
     Read-Host "按回车退出"; exit 1
 }
 
-Write-Host "密钥加载完成，正在启动网关服务 http://0.0.0.0:8501 ..." -ForegroundColor Cyan
-.\venv310\Scripts\python.exe mcp_parser.py
+Write-Host "密钥加载完成，正在启动网关服务 http://127.0.0.1:8501 ..." -ForegroundColor Cyan
+.\venv310\Scripts\python.exe -m app.server_gateway

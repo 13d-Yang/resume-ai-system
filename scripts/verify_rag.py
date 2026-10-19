@@ -2,76 +2,61 @@
 """
 RAG 简历分片 / 语义检索 验证脚本（只读，不写库、不入库）
 
-用法：
-    .\\venv310\\Scripts\\python.exe verify_rag.py
-    .\\venv310\\Scripts\\python.exe verify_rag.py 7345497a-c775-43e9-8434-f39073add090
-    .\\venv310\\Scripts\\python.exe verify_rag.py id1 id2
+用法（项目根目录执行）：
+    .\\venv310\\Scripts\\python.exe scripts\\verify_rag.py
+    .\\venv310\\Scripts\\python.exe scripts\\verify_rag.py <knowledge_id>
+    .\\venv310\\Scripts\\python.exe scripts\\verify_rag.py <id1> <id2>
 
 验证三件事：
   探针A：分片是否切对（数量、向量维度=1024、无空向量）
-  探针B：语义检索是否真的懂"意思相近"——同义改写（不含简历原词）也该命中，
-         无关问题（负样本）分数应明显更低
+  探针B：语义检索是否真的懂"意思相近"——同义改写也该命中，负样本分数应明显更低
   探针C：知识库隔离——只查某个 knowledge_id 时，返回分片不得串到别的库
 """
-import sys
-import json
 import argparse
+import json
+import os
+import sys
 
-import pymysql
-
-# Windows 控制台中文输出
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
-from config import MYSQL_CONFIG, EMBED_MODEL
-from mcp_all_in_one import get_cloud_embedding, cosine_similarity
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 
-# 默认验证你截图里的两个知识库（同一份简历的两次入库，可顺带看出重复数据）
+from app.config import EMBED_MODEL  # noqa: E402
+from app.repositories import chunk_repository  # noqa: E402
+from app.services.embedding_service import (  # noqa: E402
+    cosine_similarity,
+    get_cloud_embedding,
+)
+
 DEFAULT_IDS = [
     "7345497a-c775-43e9-8434-f39073add090",
     "b32ce579-4097-4286-b3ec-1b13c4655edb",
 ]
 EXPECTED_DIM = 1024
 
-# ---- 探针 B：查询词设计 ----
-# 基线：简历里确实出现的原词
-BASELINE_QUERIES = [
-    "Python 开发经验",
-    "RAG 向量检索",
-]
-# 同义改写：故意避开简历原词（不写 Python/后端/RAG/简历），只表达相近意思
+BASELINE_QUERIES = ["Python 开发经验", "RAG 向量检索"]
 PARAPHRASE_QUERIES = [
     "这个人能不能做服务端程序设计和接口开发",
     "会不会做数据清洗和报表可视化",
     "有没有人力资源信息化系统的实施经历",
 ]
-# 负样本：和 IT 简历完全无关
 NEGATIVE_QUERIES = [
     "红烧肉的家常做法",
     "挖掘机液压系统维修手册",
     "小学生二年级乘法口诀",
 ]
 
-# 判定阈值（bge-large-zh 余弦相似度，宽松且留足余量）
-POS_MIN = 0.40          # 正样本 top1 至少要到这个分
-MARGIN = 0.12           # 正样本最高分 要比 负样本最高分 高出多少
+POS_MIN = 0.40
+MARGIN = 0.12
 
 
 def fetch_chunks(knowledge_id: str):
     """只读查询某知识库的全部分片"""
-    conn = pymysql.connect(**MYSQL_CONFIG)
-    try:
-        cur = conn.cursor(pymysql.cursors.DictCursor)
-        cur.execute(
-            "SELECT id, knowledge_id, chunk_text, embedding "
-            "FROM rag_doc_chunk WHERE knowledge_id=%s AND del_flag=0",
-            (knowledge_id,),
-        )
-        return cur.fetchall()
-    finally:
-        conn.close()
+    return chunk_repository.fetch_chunks_by_knowledge_id(knowledge_id)
 
 
 def search(rows, query: str, top_k: int = 3):
@@ -102,8 +87,7 @@ def probe_a(rows):
     else:
         print("✅ 分片数量在合理区间")
 
-    dims, empty = set(), 0
-    lens = []
+    dims, empty, lens = set(), 0, []
     for r in rows:
         emb = json.loads(r["embedding"]) if r["embedding"] else []
         if not emb:
@@ -118,11 +102,13 @@ def probe_a(rows):
     if dims == {EXPECTED_DIM}:
         print("✅ 所有分片向量维度正确")
     else:
-        print("❌ FAIL：存在非 1024 维向量"); ok = False
+        print("❌ FAIL：存在非 1024 维向量")
+        ok = False
     if empty == 0:
         print("✅ 没有空向量分片")
     else:
-        print(f"❌ FAIL：{empty} 个空向量（向量化失败未回滚）"); ok = False
+        print(f"❌ FAIL：{empty} 个空向量（向量化失败未回滚）")
+        ok = False
     return ok
 
 
@@ -131,21 +117,20 @@ def probe_b(rows):
     print("探针 B：语义检索检查（字面不同 ≠ 找不到，这是向量检索的核心证据）")
     print("=" * 64)
 
-    def run_group(name, queries, expect_hit):
+    def run_group(name, queries):
         print(f"\n—— {name} ——")
         group_best = -1.0
         for q in queries:
-            top = search(rows, q, top_k=1)
-            s, txt = top[0]
+            s, txt = search(rows, q, top_k=1)[0]
             group_best = max(group_best, s)
             preview = (txt or "").replace("\n", " ")[:46]
             print(f"  查询：{q}")
             print(f"    top1 相似度={s:.3f}｜命中片段：{preview}…")
         return group_best
 
-    base = run_group("B1 原词基线（本该命中）", BASELINE_QUERIES, True)
-    para = run_group("B2 同义改写（简历里没有这些词，仍应命中）", PARAPHRASE_QUERIES, True)
-    neg = run_group("B3 负样本（无关问题，应明显更低）", NEGATIVE_QUERIES, False)
+    base = run_group("B1 原词基线（本该命中）", BASELINE_QUERIES)
+    para = run_group("B2 同义改写（简历里没有这些词，仍应命中）", PARAPHRASE_QUERIES)
+    neg = run_group("B3 负样本（无关问题，应明显更低）", NEGATIVE_QUERIES)
 
     print("\n—— 判定 ——")
     ok = True
@@ -156,15 +141,17 @@ def probe_b(rows):
     if base >= POS_MIN:
         print("✅ B1 原词查询稳定命中")
     else:
-        print("❌ B1 FAIL：原词都没命中，检查 embedding/检索链路"); ok = False
+        print("❌ B1 FAIL：原词都没命中，检查 embedding/检索链路")
+        ok = False
     if para >= POS_MIN:
         print("✅ B2 同义改写也能命中 → 检索靠的是【语义】而非字面匹配")
     else:
-        print("⚠️  B2 WARN：同义改写分数偏低，可观察命中片段是否仍相关");
+        print("⚠️  B2 WARN：同义改写分数偏低，可观察命中片段是否仍相关")
     if pos_best - neg >= MARGIN:
         print("✅ B3 无关问题被有效拉开 → 系统不是无脑返回")
     else:
-        print("❌ B3 FAIL：正负样本拉不开差距，检索区分度不足"); ok = False
+        print("❌ B3 FAIL：正负样本拉不开差距，检索区分度不足")
+        ok = False
     return ok
 
 
@@ -178,12 +165,12 @@ def probe_c(all_chunks: dict):
             print(f"⚠️  知识库 {kid} 无分片，跳过")
             continue
         top = search(rows, "Python 开发经验", top_k=3)
-        # rows 本身就是按 kid 过滤后的，这里复核返回内容全部来自该库
         leaked = [t for _, t in top if t not in {r["chunk_text"] for r in rows}]
         if not leaked:
             print(f"✅ {kid[:8]}… ：top3 全部来自本库，无串库")
         else:
-            print(f"❌ {kid[:8]}… ：发现 {len(leaked)} 条其他库分片"); ok = False
+            print(f"❌ {kid[:8]}… ：发现 {len(leaked)} 条其他库分片")
+            ok = False
     return ok
 
 
@@ -206,7 +193,6 @@ def main():
         print("\n❌ 所有知识库都没有分片，请先通过 read_resume 入库后再验证")
         sys.exit(1)
 
-    # 用第一个有分片的库做 A/B；所有库做 C
     first_kid = next(k for k, v in all_chunks.items() if v)
     results = {
         "A 分片质量": probe_a(all_chunks[first_kid]),
