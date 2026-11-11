@@ -10,8 +10,9 @@ import logging
 import os
 
 from fastapi import APIRouter, File, Form, UploadFile
+from pydantic import BaseModel
 
-from app.core.llm import ai_call
+from app.core.llm import analyze_resume_text
 from app.gateway.mcp_client import call_mcp_tool_common
 from app.gateway.mcp_store import safe_temp_upload
 from app.services.document_parser import extract_resume_text
@@ -51,13 +52,20 @@ async def call_resume_parse(
     file: UploadFile = File(None),
     use_zhipu: bool = Form(False),
 ):
-    """简历完整分析。use_zhipu=true 走智谱直连，否则转发 8604 的 run_agent_chat。"""
+    """简历完整分析（固定流程）。
+    use_zhipu=true 走本地直连（绕过 MCP 的降级通道），
+    否则转发 8604 的 analyze_resume 工具（固定调 HR 分析，不交给 Agent 自主决策）。
+    """
     text, tmp_path = await _resolve_resume_text(path, file)
     try:
         if use_zhipu:
-            result = await asyncio.to_thread(ai_call, f"简历全文如下：\n{text}")
+            result = await asyncio.to_thread(
+                analyze_resume_text.invoke, {"text": text}
+            )
         else:
-            result = await call_mcp_tool_common("run_agent_chat", {"text": text}, timeout=120)
+            result = await call_mcp_tool_common(
+                "analyze_resume", {"resume_text": text}, timeout=120
+            )
         # 尝试解析 JSON 结果，不是 JSON 则原样返回
         try:
             parsed = json.loads(result)
@@ -76,7 +84,7 @@ async def _forward_simple(tool_name: str, path: str | None, file: UploadFile | N
     """四个单分析按钮的公共转发逻辑。"""
     text, tmp_path = await _resolve_resume_text(path, file)
     try:
-        result = await call_mcp_tool_common(tool_name, {"text": text}, timeout=120)
+        result = await call_mcp_tool_common(tool_name, {"resume_text": text}, timeout=120)
         return {"code": 200, "result": result}
     except Exception as e:
         logger.exception("【%s 异常】", tool_name)
@@ -133,3 +141,32 @@ async def compare_resume(paths: str = Form(...)):
 async def agent_by_path(path: str = Form(None)):
     """兼容占位接口：旧前端如调到此路径，返回提示而非 404。"""
     return {"code": 200, "result": "该接口已迁移，请使用 /airag/mcp/call_resume_parse"}
+
+
+class McpCallRequest(BaseModel):
+    """通用工具转发请求体。"""
+
+    tool_name: str
+    params: dict = {}
+
+
+# Agent 类工具内部是多轮 LLM 调用（决策 + 工具执行 + 汇总），单轮 120 秒不够用
+AGENT_TOOLS = {"run_agent_chat", "agent_chat", "rag_resume_chat"}
+AGENT_TIMEOUT = 240
+NORMAL_TIMEOUT = 120
+
+
+@router.post("/airag/mcp/call_tool")
+async def call_tool_generic(req: McpCallRequest):
+    """通用 MCP 工具转发（Java 侧统一入口）。
+    body 形如 {"tool_name": "gen_interview_question", "params": {"resume_text": "..."}}。
+    """
+    timeout = AGENT_TIMEOUT if req.tool_name in AGENT_TOOLS else NORMAL_TIMEOUT
+    logger.info("【网关转发】tool_name=%s，参数键=%s，超时=%ss",
+                req.tool_name, list(req.params.keys()), timeout)
+    try:
+        result = await call_mcp_tool_common(req.tool_name, req.params, timeout=timeout)
+        return {"code": 200, "result": result}
+    except Exception as e:
+        logger.exception("【call_tool 异常】tool_name=%s", req.tool_name)
+        return {"code": 500, "message": str(e)}

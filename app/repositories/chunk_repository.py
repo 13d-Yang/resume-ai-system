@@ -57,11 +57,12 @@ def fetch_chunks(knowledge_id_list: list[str] | None = None) -> list[dict]:
 
 
 def fetch_chunks_by_knowledge_id(knowledge_id: str) -> list[dict]:
-    """只读查询单个知识库的全部分片（验证脚本用）。"""
+    """只读查询单个知识库的全部分片，按 chunk_index 升序（拼回全文用）。"""
     with db_cursor() as cur:
         cur.execute(
-            "SELECT id, knowledge_id, chunk_text, embedding "
-            "FROM rag_doc_chunk WHERE knowledge_id=%s AND del_flag=0",
+            "SELECT id, knowledge_id, chunk_index, chunk_text, embedding "
+            "FROM rag_doc_chunk WHERE knowledge_id=%s AND del_flag=0 "
+            "ORDER BY chunk_index",
             (knowledge_id,),
         )
         return cur.fetchall()

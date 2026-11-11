@@ -7,7 +7,7 @@ import logging
 
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from zhipuai import ZhipuAI
 
 from app.config import ZHIPU_API_KEY, ZHIPU_MODEL, ZHIPU_BASE_URL
@@ -44,11 +44,31 @@ def ai_call(prompt: str, system_prompt: str = None) -> str:
         return f"❌LLM调用异常：{str(e)}"
 
 
-# ========== 消息裁剪：只保留最近N条，防止上下文溢出 ==========
-def trim_messages(messages: list[BaseMessage], keep_last: int = 4) -> list[BaseMessage]:
-    if len(messages) <= keep_last:
+# ========== 消息裁剪：按轮保留 + 历史工具结果压缩，防止上下文溢出 ==========
+def trim_history(messages: list[BaseMessage], keep_rounds: int = 50,
+                 keep_intact: int = 12) -> list[BaseMessage]:
+    """按"轮"保留历史，并把较早的工具结果原地压缩。
+
+    为什么不按条数：一次分析类问答会产生 4~6 条消息，且 get_resume_text
+    返回的是上万字全文，按条数限制会被少数几轮撑爆上下文。
+    这里以 HumanMessage 为轮起点保留最近 keep_rounds 轮；最近 keep_intact
+    条消息保持原文（当前推理需要完整数据），更早的 ToolMessage 只留占位符。
+    这样既保住"聊过什么"，又不让历史全文长期占用 token。
+    """
+    human_idx = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+    if len(human_idx) > keep_rounds:
+        # 从 HumanMessage 处截断，天然不会产生开头是孤立 ToolMessage 的非法序列
+        messages = messages[human_idx[-keep_rounds]:]
+    if len(messages) <= keep_intact:
         return messages
-    return messages[-keep_last:]
+    cutoff = len(messages) - keep_intact
+    trimmed = []
+    for i, m in enumerate(messages):
+        if i < cutoff and isinstance(m, ToolMessage):
+            m = m.model_copy(
+                update={"content": f"[历史工具结果已省略，原长 {len(str(m.content))} 字]"})
+        trimmed.append(m)
+    return trimmed
 
 
 # ========== Agent 工作流用到的 LangChain 工具 ==========
@@ -58,10 +78,27 @@ def analyze_resume_text(text: str) -> str:
     return ai_call(
         f"简历全文如下：\n{text}",
         system_prompt=(
-            "你是一位拥有15年经验的资深HR专家。"
-            "请对这份简历输出结构化的分析报告，必须包含四部分："
-            "1. 综合评分（0-100） 2. 核心优势 3. 明显短板 4. 改进建议。"
-            "严禁复述简历原文，只输出分析结论。使用中文。"
+            "你是一位拥有15年经验的资深HR专家与资深技术面试官，熟悉互联网、咨询、金融行业的招聘标准。"
+            "请对这份简历输出一份可直接用于招聘决策的深度分析报告，必须严格按以下七个部分输出，"
+            "并用 Markdown 小标题和有序列表排版：\n"
+            "1. 综合评分与结论：给出 0-100 的综合评分，并用一句话说明该候选人对应的岗位层级"
+            "（初级/中级/高级/资深）与适配方向。\n"
+            "2. 分维度评分：按『技术深度(20分)、项目复杂度(20分)、可量化成果(20分)、"
+            "工程规范(15分)、表达与结构(15分)、成长潜力(10分)』逐项给分，"
+            "每一项后面用一句话说明打分依据（引用简历中的具体事实，如技术栈、项目规模、年限）。\n"
+            "3. 核心优势：列出 3-4 条，每条采用『结论 + 简历中的具体证据』格式，"
+            "说明这条优势在求职时的价值。\n"
+            "4. 主要短板：列出 3-5 条，每条采用『现象 + 为什么是短板 + 对求职的实际影响』格式，"
+            "优先指出表述空泛、缺乏量化、技术栈与目标岗位错位等硬伤。\n"
+            "5. 改进建议：按优先级 P0（必改）、P1（强烈建议）、P2（可选）分组，"
+            "每条必须给出可操作的改法，例如『把××改为××』或『补充××维度的数据』，"
+            "不要只说『建议加强』这类空话。\n"
+            "6. 面试追问预判：列出 3-5 个面试官最可能追问的问题，并说明为什么会被追问"
+            "（对应简历中哪一处薄弱或模糊的地方）。\n"
+            "7. 结论与下一步：一句话总结是否推荐进入面试，以及候选人下一步最该做的一件事。\n"
+            "硬性要求：严禁复述或大段引用简历原文；所有结论必须能在简历中找到依据，"
+            "不得编造简历没有的信息；若某维度信息不足，明确写『简历未体现，无法评估』，"
+            "不要凭猜测补全；总篇幅控制在 900-1400 字；使用中文。"
         ),
     )
 
@@ -101,6 +138,23 @@ def risk_check_text(text: str) -> str:
             "你是一位资深背景调查专家。请从这份简历中识别潜在风险点，"
             "包括：时间线断层、夸大表述、逻辑矛盾、合规风险等。"
             "只输出风险点清单和简要说明，严禁复述简历原文，不要输出分析报告。使用中文。"
+        ),
+    )
+
+
+@tool
+def compare_text(text_a: str, name_a: str, text_b: str, name_b: str) -> str:
+    """横向对比两份简历的优劣势与录用优先级"""
+    return ai_call(
+        f"简历A（{name_a}）：\n{text_a}\n\n简历B（{name_b}）：\n{text_b}",
+        system_prompt=(
+            "你是一位拥有15年经验的资深HR专家。请横向对比这两份简历，使用中文输出：\n"
+            "1. 对比总览：一句话说明两人的定位差异（岗位方向、经验年限、技术栈侧重）。\n"
+            "2. 逐维度对比：技术深度、项目复杂度、可量化成果、工程规范、表达结构、成长潜力，"
+            "每项分别评价 A 与 B，并明确指出该项谁更强。\n"
+            "3. 各自优势与短板：分别列 2-3 条，每条必须有简历中的具体事实支撑。\n"
+            "4. 录用优先级：明确给出 A 优先还是 B 优先，并说明适用场景（岗位侧重不同则分别说明）。\n"
+            "只依据提供的简历内容，严禁编造未提及的经历、技能或数据。"
         ),
     )
 
