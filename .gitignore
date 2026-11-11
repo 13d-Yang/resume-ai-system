@@ -31,3 +31,5 @@ Thumbs.db
 
 # ===== 密钥（如改用 .env 方式） =====
 .env
+venv310/
+__pycache__/
