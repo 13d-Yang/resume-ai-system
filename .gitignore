@@ -33,3 +33,7 @@ Thumbs.db
 .env
 venv310/
 __pycache__/
+venv310/
+logs/
+pytest_cache/
+debug.log
