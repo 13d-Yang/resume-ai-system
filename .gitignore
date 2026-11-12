@@ -10,14 +10,14 @@ __pycache__/
 .pytest_cache/
 
 # ===== 运行时数据与日志（代码会自动创建） =====
-/data/
-/logs/
+data/
+logs/
 *.log
 
-# ===== 临时文件（仅限仓库根目录，避免误伤 templates/、Template*.java） =====
-/temp*
+# ===== 临时文件 =====
+temp*
 *.bak
-/_*.py
+_*.py
 
 # ===== 本地重构备份 =====
 backup*/
